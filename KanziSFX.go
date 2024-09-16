@@ -40,7 +40,7 @@ func main() {
 		err error
 	)
 
-	// Push arguments to flag pointers
+	// Push arguments to variables
 	for i := 1; i < len(os.Args); i++ {
 		if strings.HasPrefix(os.Args[i], "-") {
 			switch strings.TrimPrefix(os.Args[i], "-") {
@@ -96,7 +96,7 @@ func main() {
 	// Roll back sfxSize to beginning of Kanzi stream / end of sfx
 	sfxSize = sfxSize-3
 
-	// Determine bit strean version
+	// Determine bit stream version
 	readByte := make([]byte, 1)
 	sfxFile.Seek(sfxSize+4, io.SeekStart)
 	sfxFile.Read(readByte)
