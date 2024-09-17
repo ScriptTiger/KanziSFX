@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"io"
 	"os"
@@ -15,9 +16,9 @@ import (
 func help(err int) {
 	os.Stdout.WriteString(
 		"Usage: kanzisfx [options...]\n"+
-		" -knz           Output original Kanzi archive\n"+
-		" -o <file>      Destination file\n"+
-		" -info          Show Kanzi bit stream info\n",
+		" -knz                 Output Kanzi bit stream\n"+
+		" -o <file|directory>  Destination file or directory\n"+
+		" -info                Show Kanzi bit stream info\n",
 	)
 	os.Exit(err)
 }
@@ -33,14 +34,16 @@ func main() {
 	}
 
 	var (
-		outName string
+		outNamePtr *string
 		knzenc bool
 		orw bool
 		info bool
 		err error
 	)
 
-	// Push arguments to variables
+	outNamePtr = new(string)
+
+	// Push arguments to variables and pointers
 	for i := 1; i < len(os.Args); i++ {
 		if strings.HasPrefix(os.Args[i], "-") {
 			switch strings.TrimPrefix(os.Args[i], "-") {
@@ -51,7 +54,7 @@ func main() {
 				case "o":
 					if orw {help(3)}
 					i++
-					outName = os.Args[i]
+					outNamePtr = &os.Args[i]
 					orw = true
 					continue
 				case "info":
@@ -63,6 +66,8 @@ func main() {
 			}
 		} else {help(6)}
 	}
+
+	if *outNamePtr != "-" && !info {os.Stdout.WriteString("Checking Kanzi bit stream...\n")}
 
 	// Locate executable
 	filePath, _ := os.Executable()
@@ -76,11 +81,10 @@ func main() {
 	sfxSize := int64(1500000)
 	sfxFile.Seek(sfxSize, io.SeekStart)
 	sfxReader := bufio.NewReader(sfxFile)
-	magic := make([]byte, 5)
+	knzMagic := make([]byte, 5)
 	for {
-		for i := 0; i < 4; i++ {magic[i] = magic[i+1]}
-
-		magic[4], err = sfxReader.ReadByte()
+		for i := 0; i < 4; i++ {knzMagic[i] = knzMagic[i+1]}
+		knzMagic[4], err = sfxReader.ReadByte()
 
 		if err != nil {
 			os.Stdout.WriteString("No Kanzi stream found.\n")
@@ -88,7 +92,7 @@ func main() {
 			os.Exit(7)
 		}
 
-		if string(magic) == "\x00KANZ" {break}
+		if string(knzMagic) == "\x00KANZ" {break}
 
 		sfxSize++
 	}
@@ -101,7 +105,7 @@ func main() {
 	sfxFile.Seek(sfxSize+4, io.SeekStart)
 	sfxFile.Read(readByte)
 	version := int(readByte[0]>>4)
-	if version > BIT_STREAM_VERSION {
+	if version > BIT_STREAM_VERSION && !knzenc {
 		os.Stdout.WriteString(
 			"The Kanzi bit stream is version "+strconv.Itoa(version)+"!\n"+
 			"Your current version of KanziSFX can only support decompressing bit streams up to version "+
@@ -110,6 +114,28 @@ func main() {
 		sfxFile.Close()
 		os.Exit(8)
 	}
+
+	// Create a Kanzi reader for the Kanzi stream
+	sfxFile.Seek(sfxSize, io.SeekStart)
+	knzReader, _ := kanzi.NewReader(sfxFile, 4)
+
+	// Determine if tar archive is present
+	tarSeeker := bufio.NewReader(knzReader)
+	var isTar bool
+	tarMagic := make([]byte, 6)
+	for {
+		for i := 0; i < 5; i++ {tarMagic[i] = tarMagic[i+1]}
+		tarMagic[5], err = tarSeeker.ReadByte()
+
+		if err != nil {break}
+		if string(tarMagic) == "\x00ustar" {
+			isTar = true
+			break
+		}
+	}
+
+	// Exit if there is a tar and output is Stdout
+	if *outNamePtr == "-" && isTar && !knzenc  {help(7)}
 
 	// Show info and exit
 	if info {
@@ -126,26 +152,27 @@ func main() {
 
 		os.Stdout.WriteString(
 			"bit_stream_version="+strconv.Itoa(version)+"\n"+
-			"uncompressed_byte_size="+strconv.FormatUint(size, 10)+"\n",
+			"uncompressed_byte_size="+strconv.FormatUint(size, 10)+"\n"+
+			"tar="+strconv.FormatBool(isTar)+"\n",
 		)
 		sfxFile.Close()
 		os.Exit(0)
 	}
 
-	// Rewrite file name as needed
+	// Rewrite file/directory name as needed
 	if !orw {
-		if knzenc {outName = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))+".knz"
-		} else {outName = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))}
+		if knzenc {*outNamePtr = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))+".knz"
+		} else {*outNamePtr = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))}
 	}
 
 	// Create output file
 	var output *os.File
-	if outName == "-" {output = os.Stdout
-	} else {
-		output, _ = os.Create(outName)
-		os.Stdout.WriteString("Extracting \""+outName+"\"...\n")
+	if *outNamePtr == "-" {output = os.Stdout
+	} else if !isTar || (isTar && knzenc) {
+		output, _ = os.Create(*outNamePtr)
+		os.Stdout.WriteString("Extracting \""+*outNamePtr+"\"...\n")
+		defer output.Close()
 	}
-	defer output.Close()
 
 	// If knz flag set, dump Kanzi stream and exit
 	if knzenc {
@@ -156,12 +183,26 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create a Kanzi reader for the Kanzi stream
+	// Decompress Kanzi stream, and unarchive tar if applicable
 	sfxFile.Seek(sfxSize, io.SeekStart)
-	knzReader, _ := kanzi.NewReader(sfxFile, 4)
-	defer knzReader.Close()
-
-	// Decompress Kanzi stream to output
-	io.Copy(output, knzReader)
+	knzReader, _ = kanzi.NewReader(sfxFile, 4)
+	if isTar {
+		tarReader := tar.NewReader(knzReader)
+		os.MkdirAll(*outNamePtr, 0755)
+		for {
+			tarHeader, err := tarReader.Next()
+			if err != nil {break}
+			name := filepath.Join(*outNamePtr, tarHeader.Name)
+			if tarHeader.Typeflag == tar.TypeDir {os.Mkdir(name, 0755)
+			} else {
+				os.Stdout.WriteString("Extracting "+name+"...\n")
+				outputTar, _ := os.Create(name)
+				io.Copy(outputTar, tarReader)
+				outputTar.Close()
+			}
+		}
+	} else {
+		io.Copy(output, knzReader)
+	}
 
 }
